@@ -1771,6 +1771,7 @@ export function apply(ctx: Context): void {
     if (existing !== null) return () => {}
     const tag = document.createElement('style')
     tag.dataset.memoryEvolveCss = '1'
+    tag.setAttribute('data-plugin', 'dsh-memory-evolve') // 样式账本归属（上游 issue #89）
     tag.textContent = styles
     document.head.appendChild(tag)
     return () => { tag.remove() }
@@ -1784,6 +1785,7 @@ export function apply(ctx: Context): void {
     if (existing !== null) return () => {}
     const tag = document.createElement('style')
     tag.dataset.skillBrowserCss = '1'
+    tag.setAttribute('data-plugin', 'dsh-memory-evolve') // 样式账本归属（上游 issue #89）
     tag.textContent = skillBrowserStyles
     document.head.appendChild(tag)
     return () => { tag.remove() }

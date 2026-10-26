@@ -53,6 +53,7 @@ function injectCanvasStyles(): () => void {
   if (existing !== null) return () => {}
   const tag = document.createElement('style')
   tag.setAttribute(STYLE_ATTR, '1')
+  tag.setAttribute('data-plugin', 'dsh-memory-evolve') // 样式账本归属（上游 issue #89）
   tag.textContent = styles
   document.head.appendChild(tag)
   return () => { tag.remove() }
