@@ -137,11 +137,14 @@ function formatTime(ms: number): string {
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`
 }
 
-/** source 徽标配色：user→deepseek 蓝、project→green、bundled→neutral、其他→amber。 */
+/** source 徽标配色：user→deepseek 蓝、project→green、bundled→neutral、其他→amber。
+ * 兼容：DSH 0.2.1 起运行时技能（如 armor-playbook）可能没有 source，宿主端
+ * 已统一兜底成 'runtime'；这里再做一层类型守卫，任何异常值都不至于白屏。 */
 function sourceClass(source: string): string {
-  if (source.startsWith('user')) return ' sb-badge--user'
-  if (source.startsWith('project')) return ' sb-badge--project'
-  if (source === 'bundled') return ' sb-badge--bundled'
+  const value = typeof source === 'string' ? source : ''
+  if (value.startsWith('user')) return ' sb-badge--user'
+  if (value.startsWith('project')) return ' sb-badge--project'
+  if (value === 'bundled') return ' sb-badge--bundled'
   return ' sb-badge--other'
 }
 
@@ -214,7 +217,7 @@ function SkillList(props: SkillListProps): JSX.Element {
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase()
     return skills.filter((s) => {
-      if (sourceFilter !== 'all' && s.source !== sourceFilter) return false
+      if (sourceFilter !== 'all' && (s.source ?? 'runtime') !== sourceFilter) return false
       const available = s.invocable && !s.disabled
       if (statusFilter === 'enabled' && !available) return false
       if (statusFilter === 'disabled' && available) return false
@@ -302,8 +305,8 @@ function SkillList(props: SkillListProps): JSX.Element {
                 {skill.disabled && (
                   <span className="sb-badge sb-badge--disabled">{t('disabled.badge')}</span>
                 )}
-                <span className={`sb-badge${sourceClass(skill.source)}`}>
-                  {t('source.badge', { source: skill.source })}
+                <span className={`sb-badge${sourceClass(skill.source ?? '')}`}>
+                  {t('source.badge', { source: skill.source ?? 'runtime' })}
                 </span>
               </span>
               <span className="sb-card-desc">{skill.description}</span>
@@ -862,7 +865,10 @@ export function SkillsBrowser({ t, sessionId }: SkillsBrowserProps): JSX.Element
   // 目录中实际出现的来源（首见顺序）+ 计数，用于筛选 chips
   const sourceCounts = useMemo(() => {
     const map = new Map<string, number>()
-    for (const s of skills) map.set(s.source, (map.get(s.source) ?? 0) + 1)
+    for (const s of skills) {
+      const key = s.source ?? 'runtime'
+      map.set(key, (map.get(key) ?? 0) + 1)
+    }
     return [...map.entries()].map(([source, count]) => ({ source, count }))
   }, [skills])
 

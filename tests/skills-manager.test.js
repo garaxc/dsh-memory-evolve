@@ -96,12 +96,22 @@ async function bootSkillsManager(overrides = {}) {
 
   const ctx = {
     skills: skillsService,
-    // issue #6：agentPresets 服务（260810 快照起 skill-local 按 preset scope
-    // 分层，管理界面查询目录需带默认 preset 的 standing scope key）。
+    // DSH 0.2.1 契约：agentPresets 用 acquireScope(id?) 借 standing scope
+    // （返回 { key, [Symbol.asyncDispose] }）与 serviceFor(agent, 'skills')
+    // 取 preset 挂载组内的 skills 实例；旧的 standingKeyFor 已被上游删除。
     // overrides.agentPresets 可传 null 模拟「无该服务的旧环境」。
     agentPresets: overrides.agentPresets === undefined
-      ? { standingKeyFor: async () => ({ agentPreset: 'standard' }) }
+      ? {
+        acquireScope: async () => ({
+          key: { agentPreset: 'standard' },
+          async [Symbol.asyncDispose]() {},
+        }),
+      }
       : overrides.agentPresets,
+    // overrides.agents：模拟活跃会话（agents.get(sessionId) → Agent 对象）。
+    agents: overrides.agents ?? {
+      get: () => undefined,
+    },
     get(name) {
       // 受限 ctx 的服务探测：未提供的服务返回 undefined（skills.js 同款模式）
       return ctx[name]
@@ -443,15 +453,19 @@ test('skills-manager: file browse/read stays root-scoped', async () => {
   }
 })
 
-// issue #6：260810 快照起 skill-local 注册在 agent preset 的 scope 层，无 scope
-// 的 skills.list() 只读 global 层 → 技能管理列表空白。修复=列表/浏览/读/写/
-// 禁用校验全部带默认 preset 的 standing scope key 查询目录。
+// issue #6 / DSH 0.2.1：scope 分层的三种视图。
+// 1) 活跃会话：agents.get(sessionId) → agentPresets.serviceFor(agent,'skills')
+//    取 preset 挂载组内的 skills 实例，scope 传 Agent 本体（官方
+//    session-controller/skill-catalog.ts 的做法）；
+// 2) 冷会话/无会话：acquireScope(默认 preset) 的 lease.key；
+// 3) 无 preset 服务（旧快照/TUI）：无 scope（旧行为）。
 test('skills-manager: catalog queries carry the default preset scope (issue #6)', async () => {
   const sm = await bootSkillsManager()
   try {
     // 1) 列表：list 收到默认 preset 的 scope key
     const list = await sm.request('GET', '/skills-manager/api/skills')
     assert.equal(list.status, 200)
+    assert.equal(list.data.view, 'preset')
     assert.deepEqual(sm.lastListScope(), { agentPreset: 'standard' })
     // 2) browse/read/write 同样带 scope（三个接口共用 collectRoots）
     await sm.request('GET', '/skills-manager/api/browse?root=%2Fany&path=')
@@ -470,6 +484,87 @@ test('skills-manager: catalog queries carry the default preset scope (issue #6)'
   }
 })
 
+// DSH 0.2.1：活跃会话走 preset 挂载组内的 skills 实例 + scope=Agent 本体，
+// 否则 preset 层里的用户/项目技能一条都读不到（只剩 global 层的运行时技能）。
+test('skills-manager: a live session reads its preset-scoped catalog (DSH 0.2.1)', async () => {
+  const agent = { id: 'session-1' }
+  const presetSkill = {
+    name: 'preset-only',
+    description: 'skill contributed by the preset layer',
+    source: 'user-agents',
+    provider: 'skill-filesystem',
+    invocation: { modelInvocable: true, userInvocable: true },
+  }
+  const scopedScopes = []
+  const scopedRegistry = {
+    list: async (opts) => {
+      scopedScopes.push(opts?.scope)
+      return [presetSkill]
+    },
+    get: async (name) => (name === presetSkill.name ? presetSkill : undefined),
+  }
+  let acquireCalls = 0
+  const sm = await bootSkillsManager({
+    agents: { get: (id) => (id === 'session-1' ? agent : undefined) },
+    agentPresets: {
+      acquireScope: async () => {
+        acquireCalls += 1
+        return { key: { agentPreset: 'standard' }, async [Symbol.asyncDispose]() {} }
+      },
+      serviceFor: (target, service) => (target === agent && service === 'skills' ? scopedRegistry : undefined),
+    },
+  })
+  try {
+    const list = await sm.request('GET', '/skills-manager/api/skills?sessionId=session-1')
+    assert.equal(list.status, 200)
+    assert.equal(list.data.view, 'session')
+    assert.deepEqual(list.data.skills.map((s) => s.name), ['preset-only'])
+    // scope 传的是 Agent 本体（官方契约），活跃会话不借 preset lease
+    assert.deepEqual(scopedScopes, [agent])
+    assert.equal(acquireCalls, 0)
+    // 禁用校验用同一视图（否则 preset 层技能一律 404）：这里命中「无本地
+    // SKILL.md 的运行时技能」哨兵 → 403，说明校验确实看到了 preset 层那一份。
+    const disable = await sm.request('POST', '/skills-manager/api/skills/disable', {
+      name: 'preset-only',
+      sessionId: 'session-1',
+    })
+    assert.equal(disable.status, 403)
+    assert.match(disable.data.error, /runtime skill/)
+  } finally {
+    await sm.close()
+    sm.cleanup()
+  }
+})
+
+// DSH 0.2.1 回归：skills.register() 注册的运行时技能允许不带 source
+// （dsh-purge-flash 的 armor-playbook 就是这样），list() 原样透传 undefined。
+// 旧代码直接 source.startsWith('project') → 整个列表 500。
+test('skills-manager: runtime skills without a source do not break the catalog', async () => {
+  const sm = await bootSkillsManager()
+  try {
+    sm.catalog.set('armor-playbook', {
+      name: 'armor-playbook',
+      description: 'runtime skill registered without a source field',
+      invocation: { modelInvocable: true, userInvocable: true },
+      // 刻意不提供 source / provider / path / resourceBase
+    })
+    const list = await sm.request('GET', '/skills-manager/api/skills')
+    assert.equal(list.status, 200)
+    const entry = list.data.skills.find((s) => s.name === 'armor-playbook')
+    assert.equal(entry.source, 'runtime')
+    assert.equal(entry.provider, 'runtime')
+    assert.equal(entry.protected, false)
+    assert.equal(entry.invocable, true)
+    // 运行时技能没有可写的 SKILL.md → 明确的 403，不是写盘异常
+    const disable = await sm.request('POST', '/skills-manager/api/skills/disable', { name: 'armor-playbook' })
+    assert.equal(disable.status, 403)
+    assert.match(disable.data.error, /runtime skill/)
+  } finally {
+    await sm.close()
+    sm.cleanup()
+  }
+})
+
 // issue #6：无 agentPresets 服务的环境（旧快照/TUI）→ scope 回退 undefined，
 // 查询退化为无 scope（旧行为），接口仍正常返回。
 test('skills-manager: no agentPresets service falls back to scopeless queries', async () => {
@@ -477,6 +572,7 @@ test('skills-manager: no agentPresets service falls back to scopeless queries', 
   try {
     const list = await sm.request('GET', '/skills-manager/api/skills')
     assert.equal(list.status, 200)
+    assert.equal(list.data.view, 'global')
     assert.equal(sm.lastListScope(), undefined)
     const disable = await sm.request('POST', '/skills-manager/api/skills/disable', { name: 'alpha' })
     assert.equal(disable.status, 200)
